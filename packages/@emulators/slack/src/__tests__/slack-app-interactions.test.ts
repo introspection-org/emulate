@@ -372,6 +372,27 @@ describe("Slack plugin - event fidelity for an installed app", () => {
     expect(history.messages[0]).toMatchObject({ bot_id: "B0TESTBOT" });
   });
 
+  it("marks a post made as the bot user through a token that names no bot", async () => {
+    const { app, store, channel } = installedApp();
+    getSlackStore(store).tokens.insert({
+      token: "xoxb-plain",
+      token_type: "test",
+      team_id: "T000000001",
+      user_id: "U0TESTBOT",
+      scopes: ["chat:write"],
+    });
+    const posted = await call(
+      app,
+      "/api/chat.postMessage",
+      { channel, text: "still the bot" },
+      {
+        Authorization: "Bearer xoxb-plain",
+        "Content-Type": "application/json",
+      },
+    );
+    expect(posted.message).toMatchObject({ bot_id: "B0TESTBOT", app_id: "A0TESTAPP" });
+  });
+
   it.each([
     [false, "channel_left"],
     [true, "group_left"],

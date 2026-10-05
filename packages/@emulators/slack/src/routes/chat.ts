@@ -144,7 +144,13 @@ export function chatRoutes(ctx: RouteContext): void {
     if (!canAccessConversation(ch, authUser)) return slackError(c, "not_in_channel");
     const authUserId = getAuthUserId(authUser);
     const authToken = c.get("authToken");
-    const botToken = authToken ? ss().tokens.findOneBy("token", authToken) : undefined;
+    const tokenRecord = authToken ? ss().tokens.findOneBy("token", authToken) : undefined;
+    const authorBot =
+      tokenRecord?.token_type === "bot" && tokenRecord.bot_id
+        ? { bot_id: tokenRecord.bot_id, app_id: tokenRecord.app_id }
+        : ss()
+            .bots.all()
+            .find((bot) => bot.user_id === authUserId);
 
     const ts = generateTs();
     const msg = ss().messages.insert({
@@ -155,9 +161,7 @@ export function chatRoutes(ctx: RouteContext): void {
       type: "message" as const,
       thread_ts,
       // A bot's own post carries its bot and app, which is how an app tells its messages apart.
-      ...(botToken?.token_type === "bot" && botToken.bot_id
-        ? { bot_id: botToken.bot_id, ...(botToken.app_id ? { app_id: botToken.app_id } : {}) }
-        : {}),
+      ...(authorBot ? { bot_id: authorBot.bot_id, ...(authorBot.app_id ? { app_id: authorBot.app_id } : {}) } : {}),
       ...richMessage.fields,
       reply_count: 0,
       reply_users: [],
