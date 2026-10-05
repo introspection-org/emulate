@@ -10,6 +10,7 @@ import type {
   RouteContext,
 } from "@emulators/core";
 import { getSlackStore } from "./store.js";
+import { installSlackEventEnrichment } from "./events.js";
 import { generateSlackId } from "./helpers.js";
 import type { SlackOAuthApp, SlackPresence, SlackTokenType, SlackUserProfile } from "./entities.js";
 import { authRoutes } from "./routes/auth.js";
@@ -25,6 +26,8 @@ import { pinsRoutes } from "./routes/pins.js";
 import { bookmarksRoutes } from "./routes/bookmarks.js";
 import { viewsRoutes } from "./routes/views.js";
 import { inspectorRoutes } from "./routes/inspector.js";
+import { appsRoutes } from "./routes/apps.js";
+import { simulatorRoutes } from "./routes/simulator.js";
 
 export { getSlackStore, type SlackStore } from "./store.js";
 export * from "./entities.js";
@@ -40,6 +43,9 @@ export interface SlackSeedConfig {
     real_name?: string;
     email?: string;
     is_admin?: boolean;
+    /** Another workspace's team id, for a Slack Connect member. Defaults to the emulated team. */
+    team_id?: string;
+    is_stranger?: boolean;
     profile?: Partial<SlackUserProfile>;
     presence?: SlackPresence;
   }>;
@@ -58,6 +64,8 @@ export interface SlackSeedConfig {
     client_secret: string;
     name: string;
     redirect_uris: string[];
+    /** Where block_actions and view_submission payloads are posted. */
+    interactivity_url?: string;
     scopes?: string[] | string;
     user_scopes?: string[] | string;
     bot_id?: string;
@@ -83,6 +91,8 @@ export interface SlackSeedConfig {
   }>;
   strict_scopes?: boolean;
   signing_secret?: string;
+  /** How long a trigger_id stays exchangeable. Slack's is 3 seconds. */
+  view_trigger_ttl_seconds?: number;
 }
 
 const DEFAULT_SLACK_SCOPES = [
@@ -248,15 +258,17 @@ export function seedFromConfig(store: Store, _baseUrl: string, config: SlackSeed
         image_192: "",
         ...u.profile,
       });
+      const userTeamId = u.team_id ?? teamId;
       ss.users.insert({
         user_id: userId,
-        team_id: teamId,
+        team_id: userTeamId,
         name: u.name,
         real_name: profile.real_name,
         email: profile.email,
         is_admin: u.is_admin ?? false,
         is_bot: false,
         deleted: false,
+        ...(u.is_stranger || userTeamId !== teamId ? { is_stranger: u.is_stranger ?? true } : {}),
         profile,
         presence: u.presence ?? "active",
         manual_presence: u.presence === "away" ? "away" : "auto",
@@ -287,6 +299,7 @@ export function seedFromConfig(store: Store, _baseUrl: string, config: SlackSeed
         members: ss.users.all().map((u) => u.user_id),
         creator,
         num_members: ss.users.all().length,
+        ...(ss.users.all().some((u) => u.team_id !== teamId) ? { is_ext_shared: true } : {}),
       });
     }
   }
@@ -321,6 +334,7 @@ export function seedFromConfig(store: Store, _baseUrl: string, config: SlackSeed
         client_secret: oa.client_secret,
         name: oa.name,
         redirect_uris: oa.redirect_uris,
+        ...(oa.interactivity_url ? { interactivity_url: oa.interactivity_url } : {}),
         scopes: normalizeScopes(oa.scopes),
         user_scopes: normalizeScopes(oa.user_scopes),
         bot_id: oa.bot_id,
@@ -381,12 +395,17 @@ export function seedFromConfig(store: Store, _baseUrl: string, config: SlackSeed
   if (config.strict_scopes !== undefined) {
     store.setData("slack.strict_scopes", config.strict_scopes);
   }
+
+  if (config.view_trigger_ttl_seconds !== undefined) {
+    store.setData("slack.view_trigger_ttl_seconds", config.view_trigger_ttl_seconds);
+  }
 }
 
 export const slackPlugin: ServicePlugin = {
   name: "slack",
   register(app: Hono<AppEnv>, store: Store, webhooks: WebhookDispatcher, baseUrl: string, tokenMap?: TokenMap): void {
     webhooks.setHeaderFactory((context) => slackWebhookHeaders(store, context));
+    installSlackEventEnrichment(store, webhooks);
 
     app.use("*", async (c, next) => {
       applySlackTokenAuth(c, store);
@@ -406,6 +425,8 @@ export const slackPlugin: ServicePlugin = {
     pinsRoutes(ctx);
     bookmarksRoutes(ctx);
     viewsRoutes(ctx);
+    appsRoutes(ctx);
+    simulatorRoutes(ctx);
     inspectorRoutes(ctx);
   },
   seed(store: Store, baseUrl: string): void {

@@ -9,6 +9,7 @@ import type {
   SlackMessage,
   SlackScheduledMessage,
   SlackView,
+  SlackViewTrigger,
 } from "./entities.js";
 
 export type SlackScopeRequirement = string | string[];
@@ -320,6 +321,35 @@ export function formatSlackView(view: SlackView) {
     app_id: view.app_id,
     bot_id: view.bot_id,
   };
+}
+
+const DEFAULT_VIEW_TRIGGER_TTL_SECONDS = 3;
+
+/** Mints the trigger_id an app exchanges for a modal, as Slack does for a user interaction. */
+export function createSlackViewTrigger(
+  store: Store,
+  slackStore: {
+    viewTriggers: { insert: (data: Omit<SlackViewTrigger, "id" | "created_at" | "updated_at">) => unknown };
+  },
+  trigger: Pick<SlackViewTrigger, "team_id" | "user_id" | "app_id"> & { view_id?: string },
+): { trigger_id: string; expires_at: number } {
+  const now = Math.floor(Date.now() / 1000);
+  const ttl = store.getData<number>("slack.view_trigger_ttl_seconds") ?? DEFAULT_VIEW_TRIGGER_TTL_SECONDS;
+  const random = Math.floor(Math.random() * 1_000_000)
+    .toString()
+    .padStart(6, "0");
+  const triggerId = `${now}.${random}.${generateSlackId("trg").toLowerCase()}`;
+  const expiresAt = now + ttl;
+  slackStore.viewTriggers.insert({
+    trigger_id: triggerId,
+    team_id: trigger.team_id,
+    user_id: trigger.user_id,
+    app_id: trigger.app_id,
+    expires_at: expiresAt,
+    used: false,
+    ...(trigger.view_id ? { view_id: trigger.view_id } : {}),
+  });
+  return { trigger_id: triggerId, expires_at: expiresAt };
 }
 
 export function getSlackConversationOpenState(ch: SlackChannel, userId?: string): boolean {

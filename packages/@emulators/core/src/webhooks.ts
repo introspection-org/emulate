@@ -20,6 +20,8 @@ export interface WebhookDelivery {
   delivered_at: string;
   duration: number | null;
   success: boolean;
+  /** Set on a redelivery: the id of the delivery it repeats. */
+  redelivery_of?: number;
 }
 
 export interface WebhookHeaderContext {
@@ -122,44 +124,77 @@ export class WebhookDispatcher {
     });
 
     for (const sub of matchingSubs) {
-      const delivery: WebhookDelivery = {
-        id: this.deliveryIdCounter++,
-        hook_id: sub.id,
-        event,
-        action,
-        payload,
-        status_code: null,
-        delivered_at: new Date().toISOString(),
-        duration: null,
-        success: false,
-      };
-
-      const body = JSON.stringify(payload);
-
-      try {
-        const headers = this.headerFactory({ event, action, body, subscription: sub, deliveryId: delivery.id });
-        const start = Date.now();
-        const response = await fetch(sub.url, {
-          method: "POST",
-          headers,
-          body,
-          signal: this.options.signal
-            ? AbortSignal.any([this.options.signal, AbortSignal.timeout(10000)])
-            : AbortSignal.timeout(10000),
-        });
-        delivery.duration = Date.now() - start;
-        delivery.status_code = response.status;
-        delivery.success = response.ok;
-      } catch {
-        delivery.duration = 0;
-        delivery.success = false;
-      }
-
-      this.deliveries.push(delivery);
-      if (this.deliveries.length > MAX_DELIVERIES) {
-        this.deliveries.splice(0, this.deliveries.length - MAX_DELIVERIES);
-      }
+      await this.deliver(sub, event, action, payload);
     }
+  }
+
+  /**
+   * Sends a recorded delivery's payload to its subscription again, as a
+   * provider does when it retries. `headers` are added to the usual ones.
+   */
+  async redeliver(
+    deliveryId: number,
+    options: { headers?: Record<string, string> } = {},
+  ): Promise<WebhookDelivery | undefined> {
+    const original = this.deliveries.find((d) => d.id === deliveryId);
+    if (!original) return undefined;
+    const sub = this.subscriptions.find((s) => s.id === original.hook_id);
+    if (!sub) return undefined;
+    return this.deliver(sub, original.event, original.action, original.payload, {
+      headers: options.headers,
+      redeliveryOf: original.id,
+    });
+  }
+
+  private async deliver(
+    sub: WebhookSubscription,
+    event: string,
+    action: string | undefined,
+    payload: unknown,
+    options: { headers?: Record<string, string>; redeliveryOf?: number } = {},
+  ): Promise<WebhookDelivery> {
+    const delivery: WebhookDelivery = {
+      id: this.deliveryIdCounter++,
+      hook_id: sub.id,
+      event,
+      action,
+      payload,
+      status_code: null,
+      delivered_at: new Date().toISOString(),
+      duration: null,
+      success: false,
+      ...(options.redeliveryOf !== undefined ? { redelivery_of: options.redeliveryOf } : {}),
+    };
+
+    const body = JSON.stringify(payload);
+
+    try {
+      const headers = {
+        ...this.headerFactory({ event, action, body, subscription: sub, deliveryId: delivery.id }),
+        ...options.headers,
+      };
+      const start = Date.now();
+      const response = await fetch(sub.url, {
+        method: "POST",
+        headers,
+        body,
+        signal: this.options.signal
+          ? AbortSignal.any([this.options.signal, AbortSignal.timeout(10000)])
+          : AbortSignal.timeout(10000),
+      });
+      delivery.duration = Date.now() - start;
+      delivery.status_code = response.status;
+      delivery.success = response.ok;
+    } catch {
+      delivery.duration = 0;
+      delivery.success = false;
+    }
+
+    this.deliveries.push(delivery);
+    if (this.deliveries.length > MAX_DELIVERIES) {
+      this.deliveries.splice(0, this.deliveries.length - MAX_DELIVERIES);
+    }
+    return delivery;
   }
 
   getDeliveries(hookId?: number): WebhookDelivery[] {

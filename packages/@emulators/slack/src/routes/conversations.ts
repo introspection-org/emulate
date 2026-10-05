@@ -122,13 +122,24 @@ export function conversationsRoutes(ctx: RouteContext): void {
       ...(inviter ? { inviter } : {}),
     });
   };
-  const dispatchMemberLeft = async (c: Context, channel: SlackChannel, user: string) => {
+  const dispatchMemberLeft = async (c: Context, channel: SlackChannel, user: string, actor: string) => {
     await dispatchConversationEvent(c, channel, "member_left_channel", {
       user,
       channel: channel.channel_id,
       channel_type: channelTypeLetter(channel),
       team: channel.team_id,
     });
+    // Slack also tells an app that its own bot user is out of the conversation.
+    const isAppBotUser = ss()
+      .installations.all()
+      .some((installation) => installation.team_id === channel.team_id && installation.bot_user_id === user);
+    if (isAppBotUser) {
+      await dispatchConversationEvent(c, channel, channel.is_private ? "group_left" : "channel_left", {
+        channel: channel.channel_id,
+        actor_id: actor,
+        event_ts: generateTs(),
+      });
+    }
   };
 
   // conversations.list
@@ -562,7 +573,7 @@ export function conversationsRoutes(ctx: RouteContext): void {
       members: updatedMembers,
       num_members: updatedMembers.length,
     })!;
-    await dispatchMemberLeft(c, updated, authUserId);
+    await dispatchMemberLeft(c, updated, authUserId, authUserId);
 
     return slackOk(c, {});
   });
@@ -610,9 +621,13 @@ export function conversationsRoutes(ctx: RouteContext): void {
     }
 
     const updatedMembers = [...ch.members, ...validUsers];
+    const invitesAnotherTeam = validUsers.some(
+      (userId) => ss().users.findOneBy("user_id", userId)?.team_id !== ch.team_id,
+    );
     const updated = ss().channels.update(ch.id, {
       members: updatedMembers,
       num_members: updatedMembers.length,
+      ...(invitesAnotherTeam ? { is_ext_shared: true } : {}),
     })!;
 
     for (const user of validUsers) {
@@ -621,6 +636,34 @@ export function conversationsRoutes(ctx: RouteContext): void {
 
     return slackOk(c, { channel: formatChannel(updated, authUserId, authSlackUser?.name) });
   });
+
+  // admin.conversations.convertToPrivate / convertToPublic
+  const convertConversation = (isPrivate: boolean) => async (c: Context) => {
+    const authUser = c.get("authUser");
+    if (!authUser) return slackError(c, "not_authed");
+    const scopeError = requireSlackScopes(c, store, ["admin.conversations:write"]);
+    if (scopeError) return scopeError;
+
+    const body = await parseSlackBody(c);
+    const channelId = typeof body.channel_id === "string" ? body.channel_id : "";
+    const ch = ss().channels.findOneBy("channel_id", channelId);
+    if (!ch) return slackError(c, "channel_not_found");
+    if (isDirectConversation(ch)) return slackError(c, "channel_type_not_supported");
+    if (isGeneralChannel(ch)) return slackError(c, "default_org_wide_channel");
+
+    const authSlackUser = getAuthSlackUser(authUser);
+    if (!authSlackUser?.is_admin) return slackError(c, "not_an_admin");
+    if (ch.is_private === isPrivate) return slackOk(c, {});
+
+    const updated = ss().channels.update(ch.id, { is_private: isPrivate, is_channel: !isPrivate })!;
+    await insertAndDispatchMessageEvent(c, updated, authSlackUser.user_id, {
+      subtype: isPrivate ? "channel_convert_to_private" : "channel_convert_to_public",
+      text: `<@${authSlackUser.user_id}> made this channel ${isPrivate ? "private" : "public"}`,
+    });
+    return slackOk(c, {});
+  };
+  app.post("/api/admin.conversations.convertToPrivate", convertConversation(true));
+  app.post("/api/admin.conversations.convertToPublic", convertConversation(false));
 
   // conversations.kick
   app.post("/api/conversations.kick", async (c) => {
@@ -656,7 +699,7 @@ export function conversationsRoutes(ctx: RouteContext): void {
       members: updatedMembers,
       num_members: updatedMembers.length,
     })!;
-    await dispatchMemberLeft(c, updated, user);
+    await dispatchMemberLeft(c, updated, user, authUserId);
 
     return slackOk(c, { errors: {} });
   });
@@ -846,6 +889,7 @@ function formatChannel(ch: SlackChannel, viewer?: string, viewerName?: string) {
     is_im: ch.is_im ?? false,
     is_mpim: ch.is_mpim ?? false,
     is_private: ch.is_private,
+    is_ext_shared: ch.is_ext_shared ?? false,
     is_archived: ch.is_archived,
     is_open: getSlackConversationOpenState(ch, viewer),
     ...(imUser ? { user: imUser } : {}),

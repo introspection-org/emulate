@@ -219,6 +219,7 @@ function formatUser(u: SlackUser, includeEmail = true) {
     is_admin: u.is_admin,
     is_bot: u.is_bot,
     deleted: u.deleted,
+    ...(u.is_stranger ? { is_stranger: true } : {}),
     profile,
   };
 }

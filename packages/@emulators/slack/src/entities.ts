@@ -47,6 +47,8 @@ export interface SlackUser extends Entity {
   is_admin: boolean;
   is_bot: boolean;
   deleted: boolean;
+  /** A member of another workspace, present through a shared (Slack Connect) channel. */
+  is_stranger?: boolean;
   profile: SlackUserProfile;
   presence?: SlackPresence;
   manual_presence?: SlackManualPresence;
@@ -62,6 +64,7 @@ export interface SlackChannel extends Entity {
   is_private: boolean;
   is_im?: boolean;
   is_mpim?: boolean;
+  is_ext_shared?: boolean;
   is_open?: boolean;
   is_open_by_user?: Record<string, boolean>;
   user?: string;
@@ -157,6 +160,8 @@ export interface SlackOAuthApp extends Entity {
   client_secret: string;
   name: string;
   redirect_uris: string[];
+  /** The app's Interactivity Request URL. */
+  interactivity_url?: string;
   scopes?: string[];
   user_scopes?: string[];
   bot_id?: string;
@@ -323,6 +328,25 @@ export interface SlackView extends Entity {
   bot_id: string;
   created: number;
   updated: number;
+}
+
+export type SlackInteractionType = "block_actions" | "view_submission";
+
+export interface SlackInteractionDelivery extends Entity {
+  delivery_id: string;
+  type: SlackInteractionType;
+  team_id: string;
+  app_id: string;
+  user_id: string;
+  channel_id?: string;
+  view_id?: string;
+  url: string;
+  payload: SlackJsonObject;
+  status_code: number | null;
+  success: boolean;
+  duration: number | null;
+  response: unknown;
+  delivered_at: string;
 }
 
 export interface SlackViewTrigger extends Entity {

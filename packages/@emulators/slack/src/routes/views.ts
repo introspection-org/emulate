@@ -1,9 +1,17 @@
 import type { Context, RouteContext } from "@emulators/core";
 import type { SlackJsonObject, SlackToken, SlackView, SlackViewType } from "../entities.js";
 import { getSlackStore } from "../store.js";
-import { formatSlackView, generateSlackId, generateTs, parseSlackBody, slackError, slackOk } from "../helpers.js";
+import {
+  createSlackViewTrigger,
+  formatSlackView,
+  generateSlackId,
+  generateTs,
+  parseSlackBody,
+  slackError,
+  slackOk,
+} from "../helpers.js";
 
-interface ParsedViewPayload {
+export interface ParsedSlackViewPayload {
   type: SlackViewType;
   blocks: SlackJsonObject[];
   private_metadata: string;
@@ -23,7 +31,6 @@ interface ConsumedTrigger {
   view_id?: string;
 }
 
-const VIEW_TRIGGER_TTL_SECONDS = 3;
 const MAX_MODAL_STACK_DEPTH = 3;
 
 export function viewsRoutes(ctx: RouteContext): void {
@@ -39,7 +46,7 @@ export function viewsRoutes(ctx: RouteContext): void {
     const userId = resolveUserId(stringField(body.user_id));
     if (!userId) return slackError(c, "user_not_found");
 
-    const parsed = parseViewPayload(body.view, "home");
+    const parsed = parseSlackViewPayload(body.view, "home");
     if (parsed.error || !parsed.view) return slackError(c, parsed.error ?? "invalid_view");
     const viewPayload = parsed.view;
 
@@ -83,7 +90,7 @@ export function viewsRoutes(ctx: RouteContext): void {
     if (!authUser) return slackError(c, "not_authed");
 
     const body = await parseSlackBody(c);
-    const parsed = parseViewPayload(body.view, "modal");
+    const parsed = parseSlackViewPayload(body.view, "modal");
     if (parsed.error || !parsed.view) return slackError(c, parsed.error ?? "invalid_view");
     const viewPayload = parsed.view;
 
@@ -115,7 +122,7 @@ export function viewsRoutes(ctx: RouteContext): void {
     const hash = stringField(body.hash);
     if (hash && hash !== view.hash) return slackError(c, "hash_conflict");
 
-    const parsed = parseViewPayload(body.view, view.type, view.type);
+    const parsed = parseSlackViewPayload(body.view, view.type, view.type);
     if (parsed.error || !parsed.view) return slackError(c, parsed.error ?? "invalid_view");
     const viewPayload = parsed.view;
     if (findDuplicateExternalId(viewPayload.external_id, view.view_id)) {
@@ -135,7 +142,7 @@ export function viewsRoutes(ctx: RouteContext): void {
     if (!authUser) return slackError(c, "not_authed");
 
     const body = await parseSlackBody(c);
-    const parsed = parseViewPayload(body.view, "modal");
+    const parsed = parseSlackViewPayload(body.view, "modal");
     if (parsed.error || !parsed.view) return slackError(c, parsed.error ?? "invalid_view");
     const viewPayload = parsed.view;
 
@@ -175,22 +182,17 @@ export function viewsRoutes(ctx: RouteContext): void {
     const userId = resolveUserId(stringField(body.user_id)) ?? referencedView?.user_id ?? resolveUserId(authUser.login);
     if (!userId || !resolveUserId(userId)) return slackError(c, "user_not_found");
 
-    const triggerId = generateTriggerId();
-    const expiresAt = nowSeconds() + VIEW_TRIGGER_TTL_SECONDS;
-    ss().viewTriggers.insert({
-      trigger_id: triggerId,
+    const trigger = createSlackViewTrigger(store, ss(), {
       team_id: teamId(),
       user_id: userId,
       app_id: actor.app_id,
-      expires_at: expiresAt,
-      used: false,
-      ...(referencedView ? { view_id: referencedView.view_id } : {}),
+      view_id: referencedView?.view_id,
     });
-    return slackOk(c, { trigger_id: triggerId, expires_at: expiresAt });
+    return slackOk(c, trigger);
   });
 
   function createView(
-    parsed: ParsedViewPayload,
+    parsed: ParsedSlackViewPayload,
     options: {
       user_id: string;
       app_id: string;
@@ -263,44 +265,44 @@ export function viewsRoutes(ctx: RouteContext): void {
     const updated = ss().viewTriggers.update(trigger.id, { used: true }) ?? trigger;
     return { value: { user_id: updated.user_id, app_id: updated.app_id, view_id: updated.view_id } };
   }
+}
 
-  function parseViewPayload(
-    value: unknown,
-    expectedType: SlackViewType,
-    fallbackType?: SlackViewType,
-  ): { view?: ParsedViewPayload; error?: string } {
-    const view = parseViewObject(value);
-    if (!view) return { error: "invalid_view" };
+export function parseSlackViewPayload(
+  value: unknown,
+  expectedType: SlackViewType,
+  fallbackType?: SlackViewType,
+): { view?: ParsedSlackViewPayload; error?: string } {
+  const view = parseViewObject(value);
+  if (!view) return { error: "invalid_view" };
 
-    const type = typeof view.type === "string" ? view.type : fallbackType;
-    if (type !== expectedType) return { error: "invalid_view" };
+  const type = typeof view.type === "string" ? view.type : fallbackType;
+  if (type !== expectedType) return { error: "invalid_view" };
 
-    const blocks = view.blocks;
-    if (!Array.isArray(blocks) || !blocks.every(isSlackJsonObject)) return { error: "invalid_view" };
+  const blocks = view.blocks;
+  if (!Array.isArray(blocks) || !blocks.every(isSlackJsonObject)) return { error: "invalid_view" };
 
-    const title = optionalObject(view.title);
-    const submit = optionalObject(view.submit);
-    const close = optionalObject(view.close);
-    const state = optionalObject(view.state) ?? { values: {} };
-    if (title === false || submit === false || close === false || state === false) return { error: "invalid_view" };
-    if (expectedType === "modal" && title === null) return { error: "invalid_view" };
+  const title = optionalObject(view.title);
+  const submit = optionalObject(view.submit);
+  const close = optionalObject(view.close);
+  const state = optionalObject(view.state) ?? { values: {} };
+  if (title === false || submit === false || close === false || state === false) return { error: "invalid_view" };
+  if (expectedType === "modal" && title === null) return { error: "invalid_view" };
 
-    return {
-      view: {
-        type: expectedType,
-        blocks,
-        private_metadata: stringField(view.private_metadata),
-        callback_id: stringField(view.callback_id),
-        external_id: stringField(view.external_id),
-        title,
-        submit,
-        close,
-        state,
-        clear_on_close: booleanField(view.clear_on_close, false),
-        notify_on_close: booleanField(view.notify_on_close, false),
-      },
-    };
-  }
+  return {
+    view: {
+      type: expectedType,
+      blocks,
+      private_metadata: stringField(view.private_metadata),
+      callback_id: stringField(view.callback_id),
+      external_id: stringField(view.external_id),
+      title,
+      submit,
+      close,
+      state,
+      clear_on_close: booleanField(view.clear_on_close, false),
+      notify_on_close: booleanField(view.notify_on_close, false),
+    },
+  };
 }
 
 function parseViewObject(value: unknown): Record<string, unknown> | undefined {
@@ -343,12 +345,4 @@ function booleanField(value: unknown, fallback: boolean): boolean {
 
 function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
-}
-
-function generateTriggerId(): string {
-  const first = Math.floor(Date.now() / 1000);
-  const second = Math.floor(Math.random() * 1_000_000)
-    .toString()
-    .padStart(6, "0");
-  return `${first}.${second}.${generateSlackId("trg").toLowerCase()}`;
 }

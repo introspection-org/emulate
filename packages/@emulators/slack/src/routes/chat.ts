@@ -143,6 +143,8 @@ export function chatRoutes(ctx: RouteContext): void {
     if (ch.is_archived) return slackError(c, "is_archived");
     if (!canAccessConversation(ch, authUser)) return slackError(c, "not_in_channel");
     const authUserId = getAuthUserId(authUser);
+    const authToken = c.get("authToken");
+    const botToken = authToken ? ss().tokens.findOneBy("token", authToken) : undefined;
 
     const ts = generateTs();
     const msg = ss().messages.insert({
@@ -152,6 +154,10 @@ export function chatRoutes(ctx: RouteContext): void {
       text: normalizedText.text,
       type: "message" as const,
       thread_ts,
+      // A bot's own post carries its bot and app, which is how an app tells its messages apart.
+      ...(botToken?.token_type === "bot" && botToken.bot_id
+        ? { bot_id: botToken.bot_id, ...(botToken.app_id ? { app_id: botToken.app_id } : {}) }
+        : {}),
       ...richMessage.fields,
       reply_count: 0,
       reply_users: [],

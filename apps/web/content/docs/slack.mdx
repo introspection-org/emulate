@@ -110,6 +110,22 @@ Modal opens and pushes require values from `/api/views.generateTriggerId`. Pass 
 - `POST /oauth/v2/authorize/callback` - local user picker callback that creates the auth code
 - `POST /api/oauth.v2.access` - token exchange
 
+## Apps & Admin
+- `POST /api/apps.uninstall` - remove an installation and its tokens; dispatches `app_uninstalled` and `tokens_revoked`
+- `POST /api/admin.conversations.convertToPrivate` - make a channel private (workspace admins)
+- `POST /api/admin.conversations.convertToPublic` - make a private channel public (workspace admins)
+
+## Simulation
+What a person does in a Slack client, sent to the app as Slack sends it. These are local helpers, not Slack API methods.
+
+- `POST /_slack/simulate/block-actions` - click an element on a stored message (`channel`, `message_ts`, and one of `action_id`, `text`, `url`; optional `user`)
+- `POST /_slack/simulate/view-submission` - submit a modal (`view_id`, `values` keyed by block id, optional `user`)
+- `POST /_slack/simulate/event-retry` - redeliver an event (`event_id`, optional `reason`) with `X-Slack-Retry-Num` and `X-Slack-Retry-Reason`
+
+Interactions are posted to the `interactivity_url` of the seeded OAuth app as a signed form with a `payload` field. A click mints a `trigger_id` the app can exchange with `views.open`. A submission applies the app's `response_action`: an empty answer closes the modal, `clear` closes the stack, and `errors`, `update` and `push` behave as in Slack. Triggers live 3 seconds unless `view_trigger_ttl_seconds` is set in the Slack seed.
+
+For an installed app, every event envelope carries `api_app_id` and `authorizations`, message events carry `channel_type`, a message that names the app's bot user also produces `app_mention`, a bot's own posts carry `bot_id` and `app_id`, and removing the bot user from a conversation produces `channel_left` or `group_left`. A seeded user with a `team_id` other than the workspace's is a Slack Connect member: their messages carry `user_team` and `source_team`, and a conversation they join reports `is_ext_shared`.
+
 ## Inspector
 
 - `GET /` - tabbed local inspector for conversations, messages, files, views, auth records, incoming webhooks, event subscriptions, and event deliveries
@@ -144,4 +160,4 @@ Set `slack.signing_secret` in seed config to sign every outbound event subscript
 
 ## Current Limits
 
-Slack Connect, Enterprise Grid admin APIs, Audit Logs API, SCIM, Legal Holds, Socket Mode, slash command and interaction simulation, user groups, reminders, stars, calls, canvases, lists, functions, workflows, chat streaming, legacy `files.upload`, exact rate limiting, and paid-plan behavior are not implemented.
+Slack Connect invitations and approvals, other Enterprise Grid admin APIs, Audit Logs API, SCIM, Legal Holds, Socket Mode, slash commands, shortcuts and `view_closed`, user groups, reminders, stars, calls, canvases, lists, functions, workflows, chat streaming, legacy `files.upload`, exact rate limiting, and paid-plan behavior are not implemented.
