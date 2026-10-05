@@ -1,5 +1,16 @@
 import type { Entity } from "@emulators/core";
 
+/** Slack's `bot_profile`, kept structural so the published types need no Slack SDK. */
+export interface SlackBotProfile {
+  id: string;
+  name: string;
+  app_id: string;
+  team_id: string;
+  icons: Record<string, string>;
+  updated: number;
+  deleted: boolean;
+}
+
 export interface SlackTeam extends Entity {
   team_id: string;
   name: string;
@@ -101,6 +112,7 @@ export interface SlackMessage extends Entity {
   icon_emoji?: string;
   bot_id?: string;
   app_id?: string;
+  bot_profile?: SlackBotProfile;
   client_msg_id?: string;
   reply_broadcast?: boolean;
   topic?: string;

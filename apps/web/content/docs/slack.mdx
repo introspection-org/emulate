@@ -112,19 +112,21 @@ Modal opens and pushes require values from `/api/views.generateTriggerId`. Pass 
 
 ## Apps & Admin
 - `POST /api/apps.uninstall` - remove an installation and its tokens; dispatches `app_uninstalled` and `tokens_revoked`
-- `POST /api/admin.conversations.convertToPrivate` - make a channel private (workspace admins)
-- `POST /api/admin.conversations.convertToPublic` - make a private channel public (workspace admins)
+- `POST /api/admin.conversations.convertToPrivate` - make a public channel private (an admin's user token)
+- `POST /api/admin.conversations.convertToPublic` - make a private channel public (an admin's user token)
 
 ## Simulation
 What a person does in a Slack client, sent to the app as Slack sends it. These are local helpers, not Slack API methods.
 
-- `POST /_slack/simulate/block-actions` - click an element on a stored message (`channel`, `message_ts`, and one of `action_id`, `text`, `url`; optional `user`)
+- `POST /_slack/simulate/block-actions` - click a button on a stored message (`channel`, `message_ts`, and one of `action_id`, `text`, `url`; optional `user`)
 - `POST /_slack/simulate/view-submission` - submit a modal (`view_id`, `values` keyed by block id, optional `user`)
 - `POST /_slack/simulate/event-retry` - redeliver an event (`event_id`, optional `reason`) with `X-Slack-Retry-Num` and `X-Slack-Retry-Reason`
 
-Interactions are posted to the `interactivity_url` of the seeded OAuth app as a signed form with a `payload` field. A click mints a `trigger_id` the app can exchange with `views.open`. A submission applies the app's `response_action`: an empty answer closes the modal, `clear` closes the stack, and `errors`, `update` and `push` behave as in Slack. Triggers live 3 seconds unless `view_trigger_ttl_seconds` is set in the Slack seed.
+Interactions are posted to the `interactivity_url` of the seeded OAuth app as a signed form with a `payload` field, shaped as `@slack/bolt` types `BlockAction` and `ViewSubmitAction`. A click mints a `trigger_id` the app can exchange with `views.open`, and carries a `response_url` (`POST /_slack/response/:id`) the app can post to for an ephemeral or `in_channel` reply, or to replace or delete the original message. A submission applies the app's `response_action`: an empty answer closes the modal, `clear` closes the stack, and `errors`, `update` and `push` behave as in Slack. Triggers live 3 seconds unless `view_trigger_ttl_seconds` is set in the Slack seed.
 
-For an installed app, every event envelope carries `api_app_id` and `authorizations`, message events carry `channel_type`, a message that names the app's bot user also produces `app_mention`, a bot's own posts carry `bot_id` and `app_id`, and removing the bot user from a conversation produces `channel_left` or `group_left`. A seeded user with a `team_id` other than the workspace's is a Slack Connect member: their messages carry `user_team` and `source_team`, and a conversation they join reports `is_ext_shared`.
+The convert methods answer `not_allowed_token_type` to a bot token, `missing_scope` to a user who is not an admin, `channel_type_not_supported` (to private) or `not_supported` (to public) for a conversation that cannot be converted, and post the `channel_convert_to_private` or `channel_convert_to_public` message. Slack limits them to Enterprise organizations; the emulator does not. `apps.uninstall` answers `invalid_client_id`, `bad_client_secret` or `client_id_token_mismatch`.
+
+For an installed app, every event envelope carries `token`, `api_app_id` and `authorizations`, message events carry `channel_type` and `event_ts`, a message that names the app's bot user also produces `app_mention`, a bot's own posts carry `bot_id`, `app_id` and `bot_profile`, and removing the bot user from a conversation produces `channel_left` or `group_left`. A seeded user with a `team_id` other than the workspace's is a Slack Connect member: their mentions and messages carry `user_team` and `source_team`, a conversation they are invited to reports `is_ext_shared`, and events in it carry `is_ext_shared_channel` on the envelope.
 
 ## Inspector
 

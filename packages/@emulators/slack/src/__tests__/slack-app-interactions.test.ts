@@ -174,8 +174,33 @@ describe("Slack plugin - interactivity simulation", () => {
       channel: { id: channel, name: "support" },
       container: { type: "message", message_ts: posted.ts, channel_id: channel },
       message: { ts: posted.ts, bot_id: "B0TESTBOT" },
-      actions: [{ type: "button", action_id: "connect_here", block_id: "bind", value: "go" }],
+      actions: [
+        {
+          type: "button",
+          action_id: "connect_here",
+          block_id: "bind",
+          value: "go",
+          text: { type: "plain_text", text: "Connect here" },
+          action_ts: expect.any(String),
+        },
+      ],
     });
+    // Every key is one BlockAction declares.
+    expect(Object.keys(payload).sort()).toEqual([
+      "actions",
+      "api_app_id",
+      "channel",
+      "container",
+      "is_enterprise_install",
+      "message",
+      "response_url",
+      "state",
+      "team",
+      "token",
+      "trigger_id",
+      "type",
+      "user",
+    ]);
 
     const opened = await call(app, "/api/views.open", { trigger_id: payload.trigger_id, view: modal }, botHeaders);
     expect(opened).toMatchObject({ ok: true, view: { callback_id: "bind_channel" } });
@@ -206,6 +231,63 @@ describe("Slack plugin - interactivity simulation", () => {
     });
     expect(missing.status).toBe(404);
     expect(await missing.json()).toMatchObject({ ok: false, error: "action_not_found" });
+  });
+
+  it("lets the app answer a click through its response_url", async () => {
+    const { app, store, channel } = installedApp();
+    const capture = answerWith();
+    const posted = await call(
+      app,
+      "/api/chat.postMessage",
+      { channel, text: "prompt", blocks: promptBlocks },
+      botHeaders,
+    );
+    await call(app, "/_slack/simulate/block-actions", { channel, message_ts: posted.ts, action_id: "connect_here" });
+    const responsePath = new URL(capture.interactions()[0].response_url as string).pathname;
+    const ss = getSlackStore(store);
+
+    expect(await call(app, responsePath, { text: "only you see this" })).toEqual({ ok: true });
+    expect(ss.ephemeralMessages.all()).toEqual([
+      expect.objectContaining({ channel_id: channel, target_user: "U000000001", text: "only you see this" }),
+    ]);
+
+    expect(await call(app, responsePath, { replace_original: true, text: "Connected", blocks: [] })).toEqual({
+      ok: true,
+    });
+    expect(ss.messages.findBy("ts", posted.ts)[0]).toMatchObject({ text: "Connected", blocks: [] });
+
+    expect(await call(app, responsePath, { delete_original: true })).toEqual({ ok: true });
+    expect(ss.messages.findBy("ts", posted.ts)).toEqual([]);
+
+    const unknown = await app.request(`${base}/_slack/response/nope`, { method: "POST", headers: authHeaders() });
+    expect(unknown.status).toBe(404);
+  });
+
+  it("clicks buttons only", async () => {
+    const { app, channel } = installedApp();
+    answerWith();
+    const posted = await call(
+      app,
+      "/api/chat.postMessage",
+      {
+        channel,
+        text: "pick",
+        blocks: [
+          {
+            type: "actions",
+            block_id: "pick",
+            elements: [{ type: "static_select", action_id: "choose", options: [] }],
+          },
+        ],
+      },
+      botHeaders,
+    );
+    const response = await app.request(`${base}/_slack/simulate/block-actions`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ channel, message_ts: posted.ts, action_id: "choose" }),
+    });
+    expect(await response.json()).toMatchObject({ ok: false, error: "unsupported_element" });
   });
 
   it("requires the app to have an interactivity_url", async () => {
@@ -246,10 +328,28 @@ describe("Slack plugin - interactivity simulation", () => {
     expect(submitted).toMatchObject({ ok: true, closed: true, response_action: null });
 
     const [payload] = capture.interactions();
+    // Every key is one ViewSubmitAction declares.
+    expect(Object.keys(payload).sort()).toEqual([
+      "api_app_id",
+      "is_enterprise_install",
+      "response_urls",
+      "team",
+      "token",
+      "trigger_id",
+      "type",
+      "user",
+      "view",
+    ]);
+    expect(payload.view).toMatchObject({
+      title: { type: "plain_text", text: "Connect" },
+      submit: { type: "plain_text", text: "Save" },
+      close: null,
+      previous_view_id: null,
+    });
     expect(payload).toMatchObject({
       type: "view_submission",
       api_app_id: "A0TESTAPP",
-      user: { id: "U000000001" },
+      user: { id: "U000000001", name: "admin" },
       view: {
         id: viewId,
         callback_id: "bind_channel",
@@ -328,9 +428,23 @@ describe("Slack plugin - event fidelity for an installed app", () => {
 
     expect(capture.jsonBodies()).toEqual([
       expect.objectContaining({
+        token: expect.any(String),
         api_app_id: "A0TESTAPP",
-        authorizations: [expect.objectContaining({ team_id: "T000000001", user_id: "U0TESTBOT", is_bot: true })],
-        event: expect.objectContaining({ type: "message", channel_type: "channel", text: "hello" }),
+        authorizations: [
+          {
+            enterprise_id: null,
+            team_id: "T000000001",
+            user_id: "U0TESTBOT",
+            is_bot: true,
+            is_enterprise_install: false,
+          },
+        ],
+        event: expect.objectContaining({
+          type: "message",
+          channel_type: "channel",
+          text: "hello",
+          event_ts: expect.any(String),
+        }),
       }),
     ]);
   });
@@ -353,7 +467,8 @@ describe("Slack plugin - event fidelity for an installed app", () => {
       ts: posted.ts,
       event_ts: posted.ts,
     });
-    expect(events[1]).not.toHaveProperty("channel_type");
+    // AppMentionEvent declares no channel_type.
+    expect(Object.keys(events[1]).sort()).toEqual(["channel", "event_ts", "text", "ts", "type", "user"]);
   });
 
   it("marks a bot's own post with its bot and app", async () => {
@@ -362,10 +477,19 @@ describe("Slack plugin - event fidelity for an installed app", () => {
     registerSlackEventSubscription(webhooks, ["message"]);
 
     const posted = await call(app, "/api/chat.postMessage", { channel, text: "from the bot" }, botHeaders);
-    expect(posted.message).toMatchObject({ bot_id: "B0TESTBOT", app_id: "A0TESTAPP" });
+    const botProfile = {
+      id: "B0TESTBOT",
+      name: "test-app",
+      app_id: "A0TESTAPP",
+      team_id: "T000000001",
+      icons: { image_48: "" },
+      updated: expect.any(Number),
+      deleted: false,
+    };
+    expect(posted.message).toMatchObject({ bot_id: "B0TESTBOT", app_id: "A0TESTAPP", bot_profile: botProfile });
     expect((capture.jsonBodies()[0] as { event: unknown }).event).toMatchObject({
       bot_id: "B0TESTBOT",
-      app_id: "A0TESTAPP",
+      bot_profile: botProfile,
     });
 
     const history = await call(app, "/api/conversations.history", { channel });
@@ -411,7 +535,8 @@ describe("Slack plugin - event fidelity for an installed app", () => {
 
     const events = (capture.jsonBodies() as Array<{ event: Record<string, unknown> }>).map((body) => body.event);
     expect(events.map((event) => event.type)).toEqual(["member_left_channel", expected]);
-    expect(events[1]).toMatchObject({ channel, actor_id: "U000000001" });
+    // Exactly ChannelLeftEvent / GroupLeftEvent.
+    expect(events[1]).toEqual({ type: expected, channel, actor_id: "U000000001", event_ts: expect.any(String) });
   });
 });
 
@@ -469,29 +594,51 @@ describe("Slack plugin - admin.conversations convert", () => {
     expect(await call(app, "/api/admin.conversations.convertToPrivate", { channel_id: channel })).toEqual({ ok: true });
     const info = await call(app, "/api/conversations.info", { channel });
     expect(info.channel).toMatchObject({ is_private: true, is_channel: false, is_group: true });
+    expect(await call(app, "/api/admin.conversations.convertToPrivate", { channel_id: channel })).toEqual({
+      ok: false,
+      error: "channel_type_not_supported",
+    });
 
     expect(await call(app, "/api/admin.conversations.convertToPublic", { channel_id: channel })).toEqual({ ok: true });
-    // Already public: nothing changes and nothing is posted.
-    expect(await call(app, "/api/admin.conversations.convertToPublic", { channel_id: channel })).toEqual({ ok: true });
+    expect(await call(app, "/api/admin.conversations.convertToPublic", { channel_id: channel })).toEqual({
+      ok: false,
+      error: "not_supported",
+    });
 
     const events = (capture.jsonBodies() as Array<{ event: Record<string, unknown> }>).map((body) => body.event);
     expect(events.map((event) => event.subtype)).toEqual(["channel_convert_to_private", "channel_convert_to_public"]);
     expect(events[0]).toMatchObject({ type: "message", channel, user: "U000000001", channel_type: "group" });
   });
 
-  it("refuses #general, direct messages and callers who are not admins", async () => {
-    const { app, store, channel } = installedApp();
+  it("answers with Slack's documented errors", async () => {
+    const { app, store, channel } = installedApp({ users: [{ name: "member" }] });
     const ss = getSlackStore(store);
     const general = ss.channels.findOneBy("name", "general")!.channel_id;
     expect(await call(app, "/api/admin.conversations.convertToPrivate", { channel_id: general })).toMatchObject({
-      error: "default_org_wide_channel",
+      error: "channel_type_not_supported",
     });
     expect(await call(app, "/api/admin.conversations.convertToPrivate", { channel_id: "C0MISSING" })).toMatchObject({
       error: "channel_not_found",
     });
     expect(
       await call(app, "/api/admin.conversations.convertToPrivate", { channel_id: channel }, botHeaders),
-    ).toMatchObject({ error: "not_an_admin" });
+    ).toMatchObject({ error: "not_allowed_token_type" });
+
+    ss.tokens.insert({
+      token: "xoxp-member",
+      token_type: "user",
+      team_id: "T000000001",
+      user_id: ss.users.findOneBy("name", "member")!.user_id,
+      scopes: ["channels:write"],
+    });
+    expect(
+      await call(
+        app,
+        "/api/admin.conversations.convertToPrivate",
+        { channel_id: channel },
+        { Authorization: "Bearer xoxp-member", "Content-Type": "application/json" },
+      ),
+    ).toEqual({ ok: false, error: "missing_scope", needed: "admin.conversations:write", provided: "channels:write" });
   });
 });
 
@@ -528,6 +675,26 @@ describe("Slack plugin - apps.uninstall", () => {
     expect(
       await call(app, "/api/apps.uninstall", { client_id: "client-1", client_secret: "wrong" }, botHeaders),
     ).toMatchObject({ error: "bad_client_secret" });
+  });
+
+  it("refuses a token that belongs to another app", async () => {
+    const { app, store } = installedApp();
+    getSlackStore(store).tokens.insert({
+      token: "xoxb-other-app",
+      token_type: "bot",
+      team_id: "T000000001",
+      user_id: "U000000001",
+      scopes: [],
+      app_id: "A0OTHERAPP",
+    });
+    expect(
+      await call(
+        app,
+        "/api/apps.uninstall",
+        { client_id: "client-1", client_secret: "secret-1" },
+        { Authorization: "Bearer xoxb-other-app", "Content-Type": "application/json" },
+      ),
+    ).toEqual({ ok: false, error: "client_id_token_mismatch" });
   });
 });
 

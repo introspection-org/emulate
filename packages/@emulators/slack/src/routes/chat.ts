@@ -1,5 +1,6 @@
 import type { Context, RouteContext } from "@emulators/core";
-import type { SlackChannel, SlackMessage, SlackUser } from "../entities.js";
+import type { GenericMessageEvent } from "@slack/types";
+import type { SlackBotProfile, SlackChannel, SlackMessage, SlackUser } from "../entities.js";
 import { buildSlackEventEnvelope, resolveSlackEventTeamId } from "../events.js";
 import { getSlackStore } from "../store.js";
 import {
@@ -146,11 +147,24 @@ export function chatRoutes(ctx: RouteContext): void {
     const authToken = c.get("authToken");
     const tokenRecord = authToken ? ss().tokens.findOneBy("token", authToken) : undefined;
     const authorBot =
-      tokenRecord?.token_type === "bot" && tokenRecord.bot_id
-        ? { bot_id: tokenRecord.bot_id, app_id: tokenRecord.app_id }
-        : ss()
-            .bots.all()
-            .find((bot) => bot.user_id === authUserId);
+      (tokenRecord?.token_type === "bot" && tokenRecord.bot_id
+        ? ss().bots.findOneBy("bot_id", tokenRecord.bot_id)
+        : undefined) ??
+      ss()
+        .bots.all()
+        .find((bot) => bot.user_id === authUserId);
+    const botProfile: SlackBotProfile | undefined =
+      authorBot?.app_id !== undefined
+        ? ({
+            id: authorBot.bot_id,
+            name: authorBot.name,
+            app_id: authorBot.app_id,
+            team_id: ch.team_id,
+            icons: authorBot.icons,
+            updated: Math.floor(new Date(authorBot.updated_at).getTime() / 1000),
+            deleted: authorBot.deleted,
+          } satisfies NonNullable<GenericMessageEvent["bot_profile"]>)
+        : undefined;
 
     const ts = generateTs();
     const msg = ss().messages.insert({
@@ -161,7 +175,8 @@ export function chatRoutes(ctx: RouteContext): void {
       type: "message" as const,
       thread_ts,
       // A bot's own post carries its bot and app, which is how an app tells its messages apart.
-      ...(authorBot ? { bot_id: authorBot.bot_id, ...(authorBot.app_id ? { app_id: authorBot.app_id } : {}) } : {}),
+      ...(authorBot ? { bot_id: authorBot.bot_id } : {}),
+      ...(botProfile ? { app_id: botProfile.app_id, bot_profile: botProfile } : {}),
       ...richMessage.fields,
       reply_count: 0,
       reply_users: [],

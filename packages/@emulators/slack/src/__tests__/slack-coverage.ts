@@ -584,6 +584,15 @@ export const slackCoverageMatrix: SlackCoverageEntry[] = [
   },
   {
     family: "simulate",
+    method: "simulate.response_url",
+    route: "POST /_slack/response/:id",
+    status: "partial",
+    testedBy: ["slack-app-interactions.test.ts"],
+    notes:
+      "The response_url a simulated click carries. Posts an ephemeral or in_channel message, or replaces or deletes the original.",
+  },
+  {
+    family: "simulate",
     method: "simulate.event_retry",
     route: "POST /_slack/simulate/event-retry",
     status: "partial",
@@ -595,7 +604,7 @@ export const slackCoverageMatrix: SlackCoverageEntry[] = [
     method: "apps.uninstall",
     route: "POST /api/apps.uninstall",
     status: "partial",
-    testedBy: ["slack-app-interactions.test.ts"],
+    testedBy: ["slack-app-interactions.test.ts", "slack-sdk.test.ts"],
     notes: "Removes the installation and its tokens and dispatches app_uninstalled and tokens_revoked.",
   },
   {
@@ -603,16 +612,18 @@ export const slackCoverageMatrix: SlackCoverageEntry[] = [
     method: "admin.conversations.convertToPrivate",
     route: "POST /api/admin.conversations.convertToPrivate",
     status: "partial",
-    testedBy: ["slack-app-interactions.test.ts"],
-    notes: "Workspace admins only. Posts and dispatches the channel_convert_to_private message.",
+    testedBy: ["slack-app-interactions.test.ts", "slack-sdk.test.ts"],
+    notes:
+      "Admin user tokens only. Posts and dispatches the channel_convert_to_private message. Slack limits the method to Enterprise organizations; the emulator does not.",
   },
   {
     family: "admin",
     method: "admin.conversations.convertToPublic",
     route: "POST /api/admin.conversations.convertToPublic",
     status: "partial",
-    testedBy: ["slack-app-interactions.test.ts"],
-    notes: "Workspace admins only. Posts and dispatches the channel_convert_to_public message.",
+    testedBy: ["slack-app-interactions.test.ts", "slack-sdk.test.ts"],
+    notes:
+      "Admin user tokens only. Posts and dispatches the channel_convert_to_public message. Slack limits the method to Enterprise organizations; the emulator does not.",
   },
   {
     family: "usergroups",

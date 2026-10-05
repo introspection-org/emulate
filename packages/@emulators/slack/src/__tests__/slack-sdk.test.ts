@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WebClient } from "@slack/web-api";
-import { getSlackStore } from "../index.js";
+import { getSlackStore, seedFromConfig } from "../index.js";
 import { SLACK_MESSAGE_TEXT_LIMIT } from "../helpers.js";
 import { slackTestToken, startSlackTestEmulator, type SlackTestEmulator } from "./helpers.js";
 
@@ -536,5 +536,41 @@ describe("Slack plugin - real @slack/web-api WebClient baseline", () => {
 
     const deleted = await client.files.delete({ file: file.id! });
     expect(deleted.ok).toBe(true);
+  });
+
+  it("converts a channel's privacy through the Slack SDK admin methods", async () => {
+    const created = await client.conversations.create({ name: "sdk-convert" });
+    const channel = created.channel!.id!;
+
+    expect((await client.admin.conversations.convertToPrivate({ channel_id: channel })).ok).toBe(true);
+    expect((await client.conversations.info({ channel })).channel?.is_private).toBe(true);
+    await expect(client.admin.conversations.convertToPrivate({ channel_id: channel })).rejects.toMatchObject({
+      data: { ok: false, error: "channel_type_not_supported" },
+    });
+
+    expect((await client.admin.conversations.convertToPublic({ channel_id: channel })).ok).toBe(true);
+    expect((await client.conversations.info({ channel })).channel?.is_private).toBe(false);
+  });
+
+  it("uninstalls an app through the Slack SDK", async () => {
+    seedFromConfig(emulator!.store, emulator!.url, {
+      oauth_apps: [
+        {
+          app_id: "A0SDKAPP",
+          client_id: "sdk-client",
+          client_secret: "sdk-secret",
+          name: "SDK App",
+          redirect_uris: ["https://app.example/callback"],
+        },
+      ],
+    });
+    const ss = getSlackStore(emulator!.store);
+    expect(ss.installations.all().map((installation) => installation.app_id)).toContain("A0SDKAPP");
+
+    await expect(client.apps.uninstall({ client_id: "sdk-client", client_secret: "wrong" })).rejects.toMatchObject({
+      data: { error: "bad_client_secret" },
+    });
+    expect((await client.apps.uninstall({ client_id: "sdk-client", client_secret: "sdk-secret" })).ok).toBe(true);
+    expect(ss.installations.all().map((installation) => installation.app_id)).not.toContain("A0SDKAPP");
   });
 });

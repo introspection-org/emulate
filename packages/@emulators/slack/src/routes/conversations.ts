@@ -1,4 +1,9 @@
 import type { Context, RouteContext } from "@emulators/core";
+import type { ChannelLeftEvent, GroupLeftEvent } from "@slack/types";
+import type {
+  AdminConversationsConvertToPrivateResponse,
+  AdminConversationsConvertToPublicResponse,
+} from "@slack/web-api";
 import type { SlackChannel, SlackFile, SlackFileShare, SlackMessage, SlackUser } from "../entities.js";
 import { buildSlackEventEnvelope, resolveSlackEventTeamId } from "../events.js";
 import { getSlackStore } from "../store.js";
@@ -134,11 +139,13 @@ export function conversationsRoutes(ctx: RouteContext): void {
       .installations.all()
       .some((installation) => installation.team_id === channel.team_id && installation.bot_user_id === user);
     if (isAppBotUser) {
-      await dispatchConversationEvent(c, channel, channel.is_private ? "group_left" : "channel_left", {
+      const left: ChannelLeftEvent | GroupLeftEvent = {
+        type: channel.is_private ? "group_left" : "channel_left",
         channel: channel.channel_id,
         actor_id: actor,
         event_ts: generateTs(),
-      });
+      };
+      await dispatchConversationEvent(c, channel, left.type, { ...left });
     }
   };
 
@@ -638,29 +645,50 @@ export function conversationsRoutes(ctx: RouteContext): void {
   });
 
   // admin.conversations.convertToPrivate / convertToPublic
+  // Slack limits both to an Enterprise organization; the emulator has one
+  // workspace, so its admins stand in for org admins.
   const convertConversation = (isPrivate: boolean) => async (c: Context) => {
+    type ConvertResponse = AdminConversationsConvertToPrivateResponse & AdminConversationsConvertToPublicResponse;
+    const refuse = (error: string, extra: Pick<ConvertResponse, "needed" | "provided"> = {}) =>
+      c.json({ ok: false, error, ...extra } satisfies ConvertResponse);
+
     const authUser = c.get("authUser");
-    if (!authUser) return slackError(c, "not_authed");
+    if (!authUser) return refuse("not_authed");
+    const authToken = c.get("authToken");
+    const tokenRecord = authToken ? ss().tokens.findOneBy("token", authToken) : undefined;
+    if (tokenRecord?.token_type === "bot") return refuse("not_allowed_token_type");
     const scopeError = requireSlackScopes(c, store, ["admin.conversations:write"]);
     if (scopeError) return scopeError;
+    // Slack grants an admin scope to admins only, so anyone else's token lacks it.
+    const authSlackUser = getAuthSlackUser(authUser);
+    if (!authSlackUser?.is_admin) {
+      return refuse("missing_scope", {
+        needed: "admin.conversations:write",
+        provided: ((c.get("authScopes") as string[] | undefined) ?? []).join(","),
+      });
+    }
 
     const body = await parseSlackBody(c);
     const channelId = typeof body.channel_id === "string" ? body.channel_id : "";
     const ch = ss().channels.findOneBy("channel_id", channelId);
-    if (!ch) return slackError(c, "channel_not_found");
-    if (isDirectConversation(ch)) return slackError(c, "channel_type_not_supported");
-    if (isGeneralChannel(ch)) return slackError(c, "default_org_wide_channel");
-
-    const authSlackUser = getAuthSlackUser(authUser);
-    if (!authSlackUser?.is_admin) return slackError(c, "not_an_admin");
-    if (ch.is_private === isPrivate) return slackOk(c, {});
+    if (!ch) return refuse("channel_not_found");
+    if (isPrivate) {
+      // Slack's wording: the channel "was a DM, MPDM, private, or the 'general' channel".
+      if (isDirectConversation(ch) || ch.is_private || isGeneralChannel(ch)) {
+        return refuse("channel_type_not_supported");
+      }
+    } else if (isDirectConversation(ch) || !ch.is_private) {
+      return refuse("not_supported");
+    }
 
     const updated = ss().channels.update(ch.id, { is_private: isPrivate, is_channel: !isPrivate })!;
     await insertAndDispatchMessageEvent(c, updated, authSlackUser.user_id, {
       subtype: isPrivate ? "channel_convert_to_private" : "channel_convert_to_public",
-      text: `<@${authSlackUser.user_id}> made this channel ${isPrivate ? "private" : "public"}`,
+      text: isPrivate
+        ? "This channel was made private. Now, it can only be viewed or joined by invitation"
+        : "This channel was made public. Any member in this workspace can see and join it",
     });
-    return slackOk(c, {});
+    return c.json({ ok: true } satisfies ConvertResponse);
   };
   app.post("/api/admin.conversations.convertToPrivate", convertConversation(true));
   app.post("/api/admin.conversations.convertToPublic", convertConversation(false));

@@ -1,6 +1,15 @@
 import { createHmac, randomUUID } from "crypto";
 import type { Context, RouteContext } from "@emulators/core";
 import type {
+  BlockButtonAction,
+  ButtonAction,
+  ViewOutput,
+  ViewResponseAction,
+  ViewStateSelectedOption as Option,
+  ViewSubmitAction,
+} from "@slack/bolt";
+import type { PlainTextElement } from "@slack/types";
+import type {
   SlackChannel,
   SlackInteractionDelivery,
   SlackInteractionType,
@@ -17,11 +26,23 @@ import {
   generateSlackId,
   generateTs,
 } from "../helpers.js";
+import { SLACK_VERIFICATION_TOKEN } from "../events.js";
 import { getSlackStore } from "../store.js";
 import { parseSlackViewPayload } from "./views.js";
 
 const MAX_INTERACTION_DELIVERIES = 1000;
 const INTERACTION_TIMEOUT_MS = 10_000;
+// Slack accepts a response_url for 30 minutes.
+const RESPONSE_URL_TTL_SECONDS = 30 * 60;
+
+interface ResponseUrlTarget {
+  team_id: string;
+  channel_id: string;
+  message_ts: string;
+  user_id: string;
+  bot_user_id: string;
+  expires_at: number;
+}
 
 interface InteractiveElement {
   block: SlackJsonObject;
@@ -35,7 +56,7 @@ interface InteractiveElement {
  * event. Each is sent to the app exactly as Slack sends it.
  */
 export function simulatorRoutes(ctx: RouteContext): void {
-  const { app, store, webhooks } = ctx;
+  const { app, store, webhooks, baseUrl } = ctx;
   const ss = () => getSlackStore(store);
 
   const findUser = (ref: unknown): SlackUser | undefined => {
@@ -61,17 +82,19 @@ export function simulatorRoutes(ctx: RouteContext): void {
     const team = ss().teams.findOneBy("team_id", teamId);
     return { id: teamId, domain: team?.domain ?? "" };
   };
-  const userRef = (user: SlackUser) => ({
-    id: user.user_id,
-    username: user.name,
-    name: user.name,
-    team_id: user.team_id,
-  });
+  const responseUrls = (): Map<string, ResponseUrlTarget> => {
+    let targets = store.getData<Map<string, ResponseUrlTarget>>("slack.response_urls");
+    if (!targets) {
+      targets = new Map();
+      store.setData("slack.response_urls", targets);
+    }
+    return targets;
+  };
 
   async function deliver(
     type: SlackInteractionType,
     oauthApp: SlackOAuthApp,
-    payload: SlackJsonObject,
+    payload: BlockButtonAction | ViewSubmitAction,
     target: { team_id: string; user_id: string; channel_id?: string; view_id?: string },
   ): Promise<SlackInteractionDelivery> {
     const url = oauthApp.interactivity_url!;
@@ -115,7 +138,7 @@ export function simulatorRoutes(ctx: RouteContext): void {
       type,
       app_id: oauthApp.app_id ?? "",
       url,
-      payload,
+      payload: { ...payload },
       status_code: statusCode,
       success,
       duration,
@@ -161,6 +184,8 @@ export function simulatorRoutes(ctx: RouteContext): void {
         (typeof body.url === "string" && body.url === element.url),
     );
     if (!match) return simulateError(c, "action_not_found", 404);
+    const label = buttonLabel(match.element);
+    if (match.element.type !== "button" || !label) return simulateError(c, "unsupported_element");
 
     const oauthApp = findApp(message.app_id, channel.team_id);
     if (!oauthApp?.interactivity_url) return simulateError(c, "interactivity_not_configured");
@@ -170,13 +195,31 @@ export function simulatorRoutes(ctx: RouteContext): void {
       user_id: user.user_id,
       app_id: appId,
     });
+    const responseId = randomUUID().replaceAll("-", "");
+    responseUrls().set(responseId, {
+      team_id: channel.team_id,
+      channel_id: channel.channel_id,
+      message_ts: message.ts,
+      user_id: user.user_id,
+      bot_user_id: oauthApp.bot_user_id ?? message.user,
+      expires_at: Math.floor(Date.now() / 1000) + RESPONSE_URL_TTL_SECONDS,
+    });
 
     const { block, element, action_id } = match;
-    const payload: SlackJsonObject = {
+    const action: ButtonAction = {
+      type: "button",
+      action_id,
+      block_id: typeof block.block_id === "string" ? block.block_id : "",
+      text: label,
+      ...(typeof element.value === "string" ? { value: element.value } : {}),
+      ...(typeof element.url === "string" ? { url: element.url } : {}),
+      action_ts: generateTs(),
+    };
+    const payload: BlockButtonAction = {
       type: "block_actions",
-      user: userRef(user),
+      user: { id: user.user_id, username: user.name, name: user.name, team_id: user.team_id },
       api_app_id: appId,
-      token: "emulate",
+      token: SLACK_VERIFICATION_TOKEN,
       container: {
         type: "message",
         message_ts: message.ts,
@@ -186,23 +229,12 @@ export function simulatorRoutes(ctx: RouteContext): void {
       },
       trigger_id: trigger.trigger_id,
       team: teamRef(channel.team_id),
-      enterprise: null,
       is_enterprise_install: false,
       channel: { id: channel.channel_id, name: channel.is_private ? "privategroup" : channel.name },
       message: formatSlackMessage(message),
       state: { values: {} },
-      actions: [
-        {
-          type: element.type,
-          action_id,
-          block_id: typeof block.block_id === "string" ? block.block_id : "",
-          ...(element.text !== undefined ? { text: element.text } : {}),
-          ...(element.value !== undefined ? { value: element.value } : {}),
-          ...(element.url !== undefined ? { url: element.url } : {}),
-          ...(element.style !== undefined ? { style: element.style } : {}),
-          action_ts: generateTs(),
-        },
-      ],
+      response_url: `${baseUrl}/_slack/response/${responseId}`,
+      actions: [action],
     };
 
     const delivery = await deliver("block_actions", oauthApp, payload, {
@@ -236,16 +268,15 @@ export function simulatorRoutes(ctx: RouteContext): void {
       view_id: view.view_id,
     });
 
-    const payload: SlackJsonObject = {
+    const payload: ViewSubmitAction = {
       type: "view_submission",
       team: teamRef(view.team_id),
-      user: userRef(user),
+      user: { id: user.user_id, name: user.name, team_id: user.team_id },
       api_app_id: view.app_id,
-      token: "emulate",
+      token: SLACK_VERIFICATION_TOKEN,
       trigger_id: trigger.trigger_id,
-      view: { ...formatSlackView(view), state: { values: state.values } },
+      view: viewOutput(view, state.values),
       response_urls: [],
-      enterprise: null,
       is_enterprise_install: false,
     };
 
@@ -254,8 +285,10 @@ export function simulatorRoutes(ctx: RouteContext): void {
       user_id: user.user_id,
       view_id: view.view_id,
     });
-    const answer = isJsonObject(delivery.response) ? delivery.response : {};
-    const action = typeof answer.response_action === "string" ? answer.response_action : null;
+    const answer: Record<string, unknown> = isJsonObject(delivery.response) ? delivery.response : {};
+    const action: ViewResponseAction["response_action"] | null = isResponseAction(answer.response_action)
+      ? answer.response_action
+      : null;
     let closed = false;
     let resultView: SlackView | undefined;
 
@@ -307,6 +340,43 @@ export function simulatorRoutes(ctx: RouteContext): void {
     });
   });
 
+  // The response_url of a simulated click: the app answers the interaction by posting here.
+  app.post("/_slack/response/:id", async (c) => {
+    const target = responseUrls().get(c.req.param("id"));
+    if (!target || target.expires_at <= Math.floor(Date.now() / 1000)) {
+      return c.json({ ok: false, error: "expired_url" }, 404);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const original = ss()
+      .messages.findBy("ts", target.message_ts)
+      .find((candidate) => candidate.channel_id === target.channel_id);
+    const content = {
+      text: typeof body.text === "string" ? body.text : "",
+      ...(Array.isArray(body.blocks) ? { blocks: body.blocks.filter(isJsonObject) } : {}),
+    };
+
+    if (body.delete_original === true) {
+      if (original) ss().messages.delete(original.id);
+    } else if (body.replace_original === true) {
+      if (original) ss().messages.update(original.id, content);
+    } else {
+      const message = {
+        ts: generateTs(),
+        channel_id: target.channel_id,
+        user: target.bot_user_id,
+        type: "message" as const,
+        ...content,
+        ...(typeof body.thread_ts === "string" ? { thread_ts: body.thread_ts } : {}),
+        reply_count: 0,
+        reply_users: [],
+        reactions: [],
+      };
+      if (body.response_type === "in_channel") ss().messages.insert(message);
+      else ss().ephemeralMessages.insert({ ...message, target_user: target.user_id });
+    }
+    return c.json({ ok: true });
+  });
+
   app.post("/_slack/simulate/event-retry", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     const eventId = typeof body.event_id === "string" ? body.event_id : "";
@@ -336,7 +406,46 @@ function isJsonObject(value: unknown): value is SlackJsonObject {
 }
 
 function elementLabel(element: SlackJsonObject): string | undefined {
-  return isJsonObject(element.text) && typeof element.text.text === "string" ? element.text.text : undefined;
+  return buttonLabel(element)?.text;
+}
+
+function buttonLabel(element: SlackJsonObject): PlainTextElement | undefined {
+  const text = element.text;
+  if (!isJsonObject(text) || typeof text.text !== "string") return undefined;
+  return { type: "plain_text", text: text.text, ...(typeof text.emoji === "boolean" ? { emoji: text.emoji } : {}) };
+}
+
+function plainText(value: SlackJsonObject | null): PlainTextElement | null {
+  if (!value || typeof value.text !== "string") return null;
+  return { type: "plain_text", text: value.text, ...(typeof value.emoji === "boolean" ? { emoji: value.emoji } : {}) };
+}
+
+/** A stored view as an interaction payload carries it, with what the person entered. */
+function viewOutput(view: SlackView, values: ViewOutput["state"]["values"]): ViewOutput {
+  return {
+    id: view.view_id,
+    team_id: view.team_id,
+    type: view.type,
+    title: plainText(view.title) ?? { type: "plain_text", text: "" },
+    close: plainText(view.close),
+    submit: plainText(view.submit),
+    blocks: view.blocks as unknown as ViewOutput["blocks"],
+    private_metadata: view.private_metadata,
+    callback_id: view.callback_id,
+    ...(view.external_id ? { external_id: view.external_id } : {}),
+    state: { values },
+    hash: view.hash,
+    clear_on_close: view.clear_on_close,
+    notify_on_close: view.notify_on_close,
+    root_view_id: view.root_view_id || null,
+    previous_view_id: view.previous_view_id ?? null,
+    app_id: view.app_id,
+    bot_id: view.bot_id,
+  };
+}
+
+function isResponseAction(value: unknown): value is ViewResponseAction["response_action"] {
+  return value === "errors" || value === "update" || value === "push" || value === "clear";
 }
 
 /** Every interactive element a message carries: actions-block elements and section accessories. */
@@ -361,11 +470,8 @@ function interactiveElements(message: SlackMessage): InteractiveElement[] {
 }
 
 /** `values` maps a block id to an option value, a list of option values, or text. */
-function submittedState(
-  view: SlackView,
-  values: unknown,
-): { values: Record<string, Record<string, SlackJsonObject>>; error?: string } {
-  const state: Record<string, Record<string, SlackJsonObject>> = {};
+function submittedState(view: SlackView, values: unknown): { values: ViewOutput["state"]["values"]; error?: string } {
+  const state: ViewOutput["state"]["values"] = {};
   for (const [blockId, value] of Object.entries(isJsonObject(values) ? values : {})) {
     const block = view.blocks.find((candidate) => candidate.type === "input" && candidate.block_id === blockId);
     if (!block || !isJsonObject(block.element)) return { values: state, error: `no_input_block:${blockId}` };
@@ -375,20 +481,22 @@ function submittedState(
       ...(Array.isArray(element.options) ? element.options : []),
       ...groups.flatMap((group) => (Array.isArray(group.options) ? group.options : [])),
     ].filter(isJsonObject);
-    const option = (wanted: unknown) => options.find((candidate) => candidate.value === wanted);
+    const option = (wanted: unknown) => options.find((candidate) => candidate.value === wanted) as Option | undefined;
     const type = typeof element.type === "string" ? element.type : "plain_text_input";
     const actionId = typeof element.action_id === "string" ? element.action_id : blockId;
 
     if (type === "checkboxes" || type === "multi_static_select") {
-      const picked = (Array.isArray(value) ? value : [value]).map(option);
-      if (picked.some((candidate) => !candidate)) return { values: state, error: `no_option:${blockId}` };
+      const picked = (Array.isArray(value) ? value : [value]).map(option).filter((found) => found !== undefined);
+      if (picked.length !== (Array.isArray(value) ? value.length : 1)) {
+        return { values: state, error: `no_option:${blockId}` };
+      }
       state[blockId] = { [actionId]: { type, selected_options: picked } };
     } else if (type === "static_select" || type === "radio_buttons") {
       const picked = option(value);
       if (!picked) return { values: state, error: `no_option:${blockId}` };
       state[blockId] = { [actionId]: { type, selected_option: picked } };
     } else {
-      state[blockId] = { [actionId]: { type, value } };
+      state[blockId] = { [actionId]: { type, value: typeof value === "string" ? value : null } };
     }
   }
   return { values: state };
